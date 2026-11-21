@@ -16,7 +16,8 @@ forward you would otherwise set up by hand.
 
 | Piece | Purpose |
 |---|---|
-| `phone-termux-mount.service` | runs as **your user**: `ExecStartPre` waits for the phone, creates `adb forward tcp:8022 tcp:8022`, checks that sshd answers (and asks the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app to start it if not), then sshfs mounts `/data/data/com.termux/files/home` in the foreground |
+| `phone-termux-mount.service` | runs as **your user**, sshfs mounting `/data/data/com.termux/files/home` in the foreground. Its `ExecStartPre` differs by transport: `adb` waits for the phone, creates `adb forward tcp:8022 tcp:8022`, then checks sshd; `direct` only checks sshd. In both cases the phone is asked to start sshd through the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app when it does not answer |
+| `phone-termux-mount-watchdog.timer` | every 2 min, probes sshd; when a mount that claims to be `active` no longer answers, restarts the mount unit so it resyncs instead of sitting there dead |
 
 The mount is started at boot and restarted every 30 s while the phone is unreachable, so
 replugging or rebooting the phone heals on its own. Because sshfs runs as your user,
@@ -34,6 +35,8 @@ On the phone, once:
    mount happens in the background.
 3. Optional but recommended: [`com.termux.adbbridge`](https://github.com/MBanucu/termux-adb-bridge)
    installed and granted, so `startSshd` can restart `sshd` without you touching the phone.
+4. For `transport = "direct"` (no adb at all), `sshd` must start on its own after a
+   reboot — see [sshd at boot](#sshd-at-boot).
 
 On the NixOS machine: `adb devices` must show the phone as `device` (that authorizes
 USB access; adb's udev rules are enabled by this module).
@@ -82,6 +85,7 @@ imports = [ "${builtins.fetchTarball "https://github.com/MBanucu/phone-termux-mo
 | Option | Default | Meaning |
 |---|---|---|
 | `enable` | `false` | turn the module on |
+| `transport` | `"adb"` | `adb` for the forward over adb, `direct` for ssh straight to the phone's sshd |
 | `user` | — | local account owning the mountpoint, running the adb forward |
 | `remoteUser` | — | Termux's Linux user (`whoami` in Termux, e.g. `u0_a514`) |
 | `sshHost` | `"127.0.0.1"` | host of the adb forward |
@@ -91,6 +95,8 @@ imports = [ "${builtins.fetchTarball "https://github.com/MBanucu/phone-termux-mo
 | `identityFile` | `/home/<user>/.ssh/id_ed25519_phone` | key authorized in Termux |
 | `startSshd` | `true` | ask the bridge app to start sshd when it does not answer |
 | `extraOptions` | `[]` | extra sshfs options, e.g. `[ "cache=yes" ]` |
+| `watchdog.enable` | `true` | restart the mount when sshd stops answering |
+| `watchdog.interval` | `"2min"` | how often the watchdog probes sshd |
 | `wifi.enable` | `false` | use adb over Wi-Fi instead of the cable, and prefer it when available |
 | `wifi.host` | — | the phone's address on the network (required when `wifi.enable`) |
 | `wifi.port` | `5555` | port adbd listens on in TCP mode |
@@ -140,6 +146,53 @@ $ nix run github:MBanucu/phone-termux-mount#phone-connect
 $ PHONE_HOST=192.168.77.232 nix run .#phone-connect
 ```
 
+## sshd at boot
+
+`transport = "direct"` talks to the phone's own `sshd`, so nothing needs keeping alive —
+but `sshd` has to be running after a reboot, and Termux only starts it when someone asks.
+The supported way is the official [Termux:Boot](https://github.com/termux/termux-boot)
+add-on plus a script in `~/.termux/boot/`.
+
+1. Install Termux:Boot **from the same source as Termux**. It shares Termux's UID
+   (`sharedUser=com.termux`) and runs the scripts itself, so a different signing key means
+   it is a different app and cannot see `~/.termux/boot` at all:
+
+   | Termux came from | Install from |
+   |---|---|
+   | F-Droid (`installerPackageName=org.fdroid.fdroid`) | <https://f-droid.org/packages/com.termux.boot/> |
+   | GitHub releases | <https://github.com/termux/termux-boot/releases> |
+
+   Open the add-on once after installing. Some ROMs (Blackview, Xiaomi, ColorOS) block
+   boot receivers of apps that were never launched; one manual start lifts that. Also make
+   sure Termux is exempt from battery optimisation, or the boot job never runs.
+
+2. Create the script. Termux:Boot executes everything in `~/.termux/boot/` (mode 700):
+
+   ```sh
+   mkdir -p ~/.termux/boot
+   cat > ~/.termux/boot/start-sshd <<'EOF'
+   #!/data/data/com.termux/files/usr/bin/sh
+   # Run by Termux:Boot at boot: keep sshd up so the sshfs mount reconnects.
+   /data/data/com.termux/files/usr/bin/sshd
+   EOF
+   chmod 700 ~/.termux/boot/start-sshd
+   ```
+
+3. Test it without rebooting — the script is what matters, and it can be run directly:
+
+   ```console
+   $ pkill sshd                       # the mount drops
+   $ sh ~/.termux/boot/start-sshd     # or let Termux:Boot run it
+   $ ssh … 'pgrep -c sshd'            # back to serving
+   ```
+
+   The mount's `Restart=always` brings the sshfs tunnel back within its 30 s retry window,
+   so no action is needed on this machine.
+
+Once Termux:Boot is in place, a reboot needs no intervention: the phone rejoins the
+network, `sshd` starts, and the mount reconnects. What is *not* covered is `Termux` being
+force-stopped or its data cleared.
+
 ## Troubleshooting
 
 **`~/phone-termux` is empty or `ls` hangs.** The unit could not reach sshd. Check
@@ -167,6 +220,32 @@ helper on NixOS, because the store copy of `fusermount3` cannot unmount:
 
 ```console
 $ /run/wrappers/bin/fusermount3 -u ~/phone-termux
+```
+
+## When the phone goes away
+
+sshfs is started with `reconnect`, which is what makes a short network hiccup
+survivable — but it also means sshfs does **not** exit when sshd dies or the phone drops
+off the network. The unit keeps saying `active` while the mount answers nothing.
+
+The watchdog closes that gap. Every `watchdog.interval` it runs
+
+```console
+ssh -p 8022 … u0_a514@192.168.77.232 true
+```
+
+as root with the mount's key. If that fails **and** the unit is `active`, it restarts
+`phone-termux-mount.service`; the restart re-runs `ExecStartPre`, which starts sshd over
+the bridge if adb can reach the phone, then sshfs mounts again. A unit that is already
+failing and retrying (`activating`) is left alone, so a phone that stays off does not
+cause a restart every two minutes.
+
+The consequence: a dead mount heals within one interval instead of waiting for some
+unrelated access to trip over it. Check it with:
+
+```console
+$ systemctl list-timers phone-termux-mount-watchdog
+$ journalctl -u phone-termux-mount-watchdog -n 20
 ```
 
 ## Security notes

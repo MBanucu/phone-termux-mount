@@ -57,6 +57,24 @@ let
     host = cfg.sshHost;
     inherit wifiSerial connectScript;
   };
+
+  # Where ssh actually lives, which is what the probe has to test.
+  probeHost =
+    if cfg.transport == "direct" && cfg.wifi.host != "" then cfg.wifi.host else cfg.sshHost;
+
+  ensureSshd = import ./lib/ensure-sshd.nix {
+    inherit pkgs;
+    inherit (cfg) port remoteUser identityFile startSshd;
+    host = probeHost;
+  };
+
+  watchdog = import ./lib/watchdog.nix {
+    inherit pkgs;
+    inherit (cfg) port remoteUser identityFile;
+    host = probeHost;
+    unit = "phone-termux-mount.service";
+    systemdPackage = config.systemd.package;
+  };
 in
 {
   options.services.phoneTermuxMount = {
@@ -126,6 +144,23 @@ in
       default = [ ];
       description = "Extra comma-separated options passed to sshfs.";
       example = [ "cache=yes" ];
+    };
+
+    watchdog = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Periodically check that the phone's sshd answers, and restart the mount
+          when it does not, instead of leaving a dead sshfs mount behind.
+        '';
+      };
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "2min";
+        description = "How often to probe sshd.";
+      };
     };
 
     transport = lib.mkOption {
@@ -222,10 +257,10 @@ in
       serviceConfig = {
         Type = "simple";
         User = username;
-        # Direct mode talks to the phone's own sshd, so there is no forward to
-        # create: the only prerequisite is that sshd is up, and sshfs retries
-        # every RestartSec until it is.
-        ExecStartPre = lib.optional (cfg.transport == "adb") linkScript;
+        # adb mode has a forward to create; direct mode only needs sshd to be up,
+        # and it gets started through the bridge when it is not.
+        ExecStartPre =
+          if cfg.transport == "direct" then ensureSshd else linkScript;
         ExecStart = lib.escapeShellArgs [
           "${pkgs.sshfs}/bin/sshfs"
           what
@@ -237,6 +272,26 @@ in
         ExecStop = "${config.security.wrapperDir}/fusermount3 -u ${cfg.mountpoint}";
         Restart = "always";
         RestartSec = "30s";
+      };
+    };
+
+    # sshfs stays alive when the remote sshd disappears, so the mount can look
+    # healthy while being dead. Probe it and resync when it stops answering.
+    systemd.services.phone-termux-mount-watchdog = lib.mkIf cfg.watchdog.enable {
+      description = "Restart the Termux mount if sshd stops answering";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = watchdog;
+      };
+    };
+
+    systemd.timers.phone-termux-mount-watchdog = lib.mkIf cfg.watchdog.enable {
+      description = "Periodic health check for the Termux mount";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        Unit = "phone-termux-mount-watchdog.service";
+        OnBootSec = "2min";
+        OnUnitActiveSec = cfg.watchdog.interval;
       };
     };
   };
