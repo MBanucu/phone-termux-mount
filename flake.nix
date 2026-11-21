@@ -1,0 +1,29 @@
+{
+  description = "Mount an adb-connected Android phone's Termux home on NixOS, over sshfs";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs =
+    { self, nixpkgs }:
+    let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    in
+    {
+      nixosModules.default = ./module.nix;
+      nixosModules.phone-termux-mount = ./module.nix;
+
+      # The pre-mount helper on its own, for running by hand:
+      #   nix run .#phone-termux-link
+      # Override with PHONE_PORT / PHONE_HOST / PHONE_USER / PHONE_KEY.
+      packages = forAllSystems (pkgs: {
+        phone-termux-link = import ./lib/ensure-link.nix { inherit pkgs; };
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.phone-termux-link;
+      });
+
+      formatter = forAllSystems (pkgs: pkgs.nixfmt);
+    };
+}
