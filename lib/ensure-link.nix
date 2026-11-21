@@ -43,18 +43,25 @@ pkgs.writeShellScript "phone-termux-link" ''
   # an explicit serial, else the configured Wi-Fi transport, else the only
   # device, else USB (faster, and its forward is not affected by Wi-Fi drops).
   pick_device() {
-    if [ -n "$wifi_serial" ]; then
-      if $adb devices | awk 'NR>1 && $2 == "device" { print $1 }' | grep -qx "$wifi_serial"; then
-        echo "$wifi_serial"
-        return 0
-      fi
-    fi
     devices=$($adb devices | awk 'NR>1 && $2 == "device" { print $1 }')
+    if [ -n "$wifi_serial" ] && printf '%s\n' "$devices" | grep -qx "$wifi_serial"; then
+      echo "$wifi_serial"
+      return 0
+    fi
     count=$(printf '%s\n' "$devices" | grep -c . || true)
     case "$count" in
       0) return 1 ;;
       1) printf '%s\n' "$devices"; return 0 ;;
     esac
+    # Wi-Fi is configured but the configured address is gone (a DHCP change):
+    # take whatever network transport phone-connect managed to establish.
+    if [ -n "$wifi_serial" ]; then
+      tcp=$(printf '%s\n' "$devices" | grep ':' | head -n 1 || true)
+      if [ -n "$tcp" ]; then
+        echo "$tcp"
+        return 0
+      fi
+    fi
     usb=$(printf '%s\n' "$devices" | grep -v ':' | head -n 1 || true)
     if [ -n "$usb" ]; then
       echo "$usb"
@@ -63,13 +70,12 @@ pkgs.writeShellScript "phone-termux-link" ''
     fi
   }
 
-  # No cable: bring up the Wi-Fi transport before giving up on a device.
-  if ! pick_device >/dev/null; then
-    ${pkgs.lib.optionalString (connectScript != null) ''
-      echo "no adb device yet; trying Wi-Fi"
-      ${connectScript} || true
-    ''}
-  fi
+  # Bring up the Wi-Fi transport first: phone-connect is idempotent and cheap
+  # when it is already there, and it is what makes the mount prefer the network
+  # over an attached cable.
+  ${pkgs.lib.optionalString (connectScript != null) ''
+    ${connectScript} || true
+  ''}
 
   if ! serial=$(pick_device); then
     echo "waiting for an adb device…"
