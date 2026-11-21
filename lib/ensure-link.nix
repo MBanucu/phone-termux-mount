@@ -12,6 +12,18 @@
 pkgs.writeShellScript "phone-termux-link" ''
   set -eu
 
+  # systemd units run with a minimal PATH that does not include awk, grep, head,
+  # seq or timeout, so provide them explicitly instead of assuming the caller's.
+  export PATH=${
+    pkgs.lib.makeBinPath [
+      pkgs.android-tools
+      pkgs.openssh
+      pkgs.coreutils
+      pkgs.gawk
+      pkgs.gnugrep
+    ]
+  }:$PATH
+
   port="''${PHONE_PORT:-${toString port}}"
   host="''${PHONE_HOST:-${host}}"
   remote_user="''${PHONE_USER:-${remoteUser}}"
