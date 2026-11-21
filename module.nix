@@ -6,7 +6,13 @@ let
   username = cfg.user;
 
   # The login name must live in the host spec; sshfs rejects `-o User=`.
-  what = "${cfg.remoteUser}@${cfg.sshHost}:${cfg.remotePath}";
+  # In direct mode the phone's sshd is reached over the network, so no adb
+  # forward is involved at all.
+  what =
+    if cfg.transport == "direct" then
+      "${cfg.remoteUser}@${if cfg.wifi.host != "" then cfg.wifi.host else cfg.sshHost}:${cfg.remotePath}"
+    else
+      "${cfg.remoteUser}@${cfg.sshHost}:${cfg.remotePath}";
 
   # No uid=/gid= here on purpose: NixOS assigns normal-user ids at activation,
   # so config.users.users.<name>.uid may be null at eval time. Running sshfs as
@@ -22,8 +28,10 @@ let
       "IdentityFile=${cfg.identityFile}"
       "IdentitiesOnly=yes"
       "Compression=no"
-      # The only route is the loopback adb forward, so host key verification
-      # would check nothing but that 127.0.0.1 is 127.0.0.1.
+      # Over the adb forward this checks nothing but that 127.0.0.1 is
+      # 127.0.0.1; in direct mode the phone's key is not managed by this
+      # module, so the same setting applies. Pin a known_hosts file via
+      # extraOptions if you want verification.
       "StrictHostKeyChecking=no"
       "UserKnownHostsFile=/dev/null"
     ]
@@ -120,6 +128,25 @@ in
       example = [ "cache=yes" ];
     };
 
+    transport = lib.mkOption {
+      type = lib.types.enum [
+        "adb"
+        "direct"
+      ];
+      default = "adb";
+      description = ''
+        How sshfs reaches the phone.
+
+        `adb` goes through an adb forward on 127.0.0.1, so it works over USB and,
+        with `wifi.enable`, over the network as well.
+
+        `direct` connects straight to the phone's sshd on its network address
+        (`wifi.host`), with no adb involvement at all: nothing to keep alive, no
+        forward to rebuild, and no TCP adb port exposed. Requires sshd to run on
+        the phone, e.g. started at boot by Termux:Boot.
+      '';
+    };
+
     wifi = {
       enable = lib.mkEnableOption ''
         using adb over Wi-Fi instead of the USB cable: the transport is brought up
@@ -162,6 +189,10 @@ in
         assertion = cfg.wifi.enable -> cfg.wifi.host != "";
         message = "services.phoneTermuxMount.wifi.host must be the phone's network address when wifi.enable is on.";
       }
+      {
+        assertion = cfg.transport != "direct" || cfg.wifi.host != "";
+        message = "services.phoneTermuxMount.wifi.host must be set when transport = \"direct\".";
+      }
     ];
 
     # `programs.adb` was removed in NixOS 26.05 (systemd 258 ships the uaccess
@@ -181,13 +212,20 @@ in
     # sshfs mounts. Because the pre-start runs on every restart, a replugged or
     # rebooted phone heals without manual action.
     systemd.services.phone-termux-mount = {
-      description = "Termux home from the phone (sshfs over adb)";
+      description =
+        if cfg.transport == "direct" then
+          "Termux home from the phone (sshfs over Wi-Fi)"
+        else
+          "Termux home from the phone (sshfs over adb)";
       wantedBy = [ "multi-user.target" ];
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         Type = "simple";
         User = username;
-        ExecStartPre = linkScript;
+        # Direct mode talks to the phone's own sshd, so there is no forward to
+        # create: the only prerequisite is that sshd is up, and sshfs retries
+        # every RestartSec until it is.
+        ExecStartPre = lib.optional (cfg.transport == "adb") linkScript;
         ExecStart = lib.escapeShellArgs [
           "${pkgs.sshfs}/bin/sshfs"
           what
