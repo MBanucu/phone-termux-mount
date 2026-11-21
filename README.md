@@ -162,9 +162,23 @@ add-on plus a script in `~/.termux/boot/`.
    | F-Droid (`installerPackageName=org.fdroid.fdroid`) | <https://f-droid.org/packages/com.termux.boot/> |
    | GitHub releases | <https://github.com/termux/termux-boot/releases> |
 
-   Open the add-on once after installing. Some ROMs (Blackview, Xiaomi, ColorOS) block
-   boot receivers of apps that were never launched; one manual start lifts that. Also make
-   sure Termux is exempt from battery optimisation, or the boot job never runs.
+   Then two ROM rules apply, and both have to be satisfied or the boot job silently never
+   runs:
+
+   - **Allow auto-start.** On Blackview (and Xiaomi, ColorOS, …) the boot receiver of an
+     app is blocked until it is enabled in the vendor's auto-start list — on this phone
+     `Settings → App Management → Auto Start Management`, i.e.
+     `com.blackview.systemmanager/.autoboot.AutoStartMainActivity`. Termux **and**
+     Termux:Boot have to be switched on there.
+   - **Launch it once like a user.** These ROMs also keep apps in Android's *stopped*
+     state, and a stopped package receives no `BOOT_COMPLETED` at all. Launching it with
+     `adb shell am start` clears the flag only until the next reboot; tapping the icon in
+     the launcher is what makes it stick. Verify with
+     `adb shell dumpsys package com.termux.boot | grep stopped=` — it must read `false`
+     after a reboot, and `dumpsys jobscheduler` should show
+     `com.termux.boot/.BootJobService` having started.
+
+   Also make sure Termux is exempt from battery optimisation, or the boot job never runs.
 
 2. Create the script. Termux:Boot executes everything in `~/.termux/boot/` (mode 700):
 
