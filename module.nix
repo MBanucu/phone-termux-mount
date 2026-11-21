@@ -123,9 +123,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # udev rules so the phone is accessible to the adb server without root.
-    programs.adb.enable = lib.mkDefault true;
-
+    # `programs.adb` was removed in NixOS 26.05 (systemd 258 ships the uaccess
+    # rule itself), so adb only needs to be on PATH, which this does.
     environment.systemPackages = [
       pkgs.android-tools
       pkgs.openssh
