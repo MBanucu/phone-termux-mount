@@ -30,10 +30,24 @@ let
     ++ cfg.extraOptions
   );
 
+  wifiSerial = if cfg.wifi.enable then "${cfg.wifi.host}:${toString cfg.wifi.port}" else null;
+
+  # Only built when Wi-Fi is on, so wifi.host stays unevaluated otherwise.
+  connectScript =
+    if cfg.wifi.enable then
+      import ./lib/connect.nix {
+        inherit pkgs;
+        inherit (cfg.wifi) host port;
+        bootstrapUsb = cfg.wifi.bootstrapUsb;
+      }
+    else
+      null;
+
   linkScript = import ./lib/ensure-link.nix {
     inherit pkgs;
     inherit (cfg) port remoteUser identityFile startSshd;
     host = cfg.sshHost;
+    inherit wifiSerial connectScript;
   };
 in
 {
@@ -105,9 +119,51 @@ in
       description = "Extra comma-separated options passed to sshfs.";
       example = [ "cache=yes" ];
     };
+
+    wifi = {
+      enable = lib.mkEnableOption ''
+        using adb over Wi-Fi instead of the USB cable: the transport is brought up
+        before mounting and preferred over USB when it is available'';
+
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = ''
+          The phone's address on the network, as seen from this machine — the
+          hotspot address when it shares one, e.g. 10.223.158.226.
+        '';
+        example = "10.223.158.226";
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 5555;
+        description = ''
+          Port adbd listens on in TCP mode. Classic `adb tcpip` mode, not the
+          randomised port of Android's Wireless-debugging toggle.
+        '';
+      };
+
+      bootstrapUsb = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          If nothing listens on the TCP port yet but the phone is on USB, run
+          `adb tcpip` to switch adbd into TCP mode. adbd returns to USB-only after
+          the phone reboots.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.wifi.enable -> cfg.wifi.host != "";
+        message = "services.phoneTermuxMount.wifi.host must be the phone's network address when wifi.enable is on.";
+      }
+    ];
+
     # `programs.adb` was removed in NixOS 26.05 (systemd 258 ships the uaccess
     # rule itself), so adb only needs to be on PATH, which this does.
     environment.systemPackages = [

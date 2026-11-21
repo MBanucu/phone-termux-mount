@@ -8,6 +8,10 @@
   remoteUser ? "u0_a514",
   identityFile ? null,
   startSshd ? true,
+  # When set, "<host>:<port>" of the Wi-Fi transport, which is preferred and
+  # established through connectScript before anything else is tried.
+  wifiSerial ? null,
+  connectScript ? null,
 }:
 pkgs.writeShellScript "phone-termux-link" ''
   set -eu
@@ -32,14 +36,18 @@ pkgs.writeShellScript "phone-termux-link" ''
   adb=${pkgs.android-tools}/bin/adb
   ssh=${pkgs.openssh}/bin/ssh
 
+  wifi_serial="''${PHONE_SERIAL:-${if wifiSerial == null then "" else wifiSerial}}"
+
   # A phone can be reachable over USB and Wi-Fi at the same time, and then plain
   # `adb` fails with "more than one device". Pick one transport explicitly:
-  # PHONE_SERIAL if set, else the only device, else prefer USB (faster, and its
-  # forward is not affected by Wi-Fi drops).
+  # an explicit serial, else the configured Wi-Fi transport, else the only
+  # device, else USB (faster, and its forward is not affected by Wi-Fi drops).
   pick_device() {
-    if [ -n "''${PHONE_SERIAL:-}" ]; then
-      echo "$PHONE_SERIAL"
-      return 0
+    if [ -n "$wifi_serial" ]; then
+      if $adb devices | awk 'NR>1 && $2 == "device" { print $1 }' | grep -qx "$wifi_serial"; then
+        echo "$wifi_serial"
+        return 0
+      fi
     fi
     devices=$($adb devices | awk 'NR>1 && $2 == "device" { print $1 }')
     count=$(printf '%s\n' "$devices" | grep -c . || true)
@@ -54,6 +62,14 @@ pkgs.writeShellScript "phone-termux-link" ''
       printf '%s\n' "$devices" | head -n 1
     fi
   }
+
+  # No cable: bring up the Wi-Fi transport before giving up on a device.
+  if ! pick_device >/dev/null; then
+    ${lib.optionalString (connectScript != null) ''
+      echo "no adb device yet; trying Wi-Fi"
+      ${connectScript} || true
+    ''}
+  fi
 
   if ! serial=$(pick_device); then
     echo "waiting for an adb device…"

@@ -21,7 +21,18 @@
       # Override with PHONE_PORT / PHONE_HOST / PHONE_USER / PHONE_KEY.
       packages = forAllSystems (pkgs: {
         phone-termux-link = import ./lib/ensure-link.nix { inherit pkgs; };
+        # Establishes the Wi-Fi transport on its own:
+        #   PHONE_HOST=10.223.158.226 nix run .#phone-connect
+        phone-connect = import ./lib/connect.nix { inherit pkgs; };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.phone-termux-link;
+      });
+
+      apps = forAllSystems (pkgs: {
+        default = self.apps.${pkgs.stdenv.hostPlatform.system}.phone-connect;
+        phone-connect = {
+          type = "app";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.phone-connect}/bin/phone-connect";
+        };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

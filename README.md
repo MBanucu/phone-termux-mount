@@ -91,6 +91,10 @@ imports = [ "${builtins.fetchTarball "https://github.com/MBanucu/phone-termux-mo
 | `identityFile` | `/home/<user>/.ssh/id_ed25519_phone` | key authorized in Termux |
 | `startSshd` | `true` | ask the bridge app to start sshd when it does not answer |
 | `extraOptions` | `[]` | extra sshfs options, e.g. `[ "cache=yes" ]` |
+| `wifi.enable` | `false` | use adb over Wi-Fi instead of the cable, and prefer it when available |
+| `wifi.host` | — | the phone's address on the network (required when `wifi.enable`) |
+| `wifi.port` | `5555` | port adbd listens on in TCP mode |
+| `wifi.bootstrapUsb` | `true` | if nothing listens yet and the phone is on USB, run `adb tcpip` once |
 
 ## Using it
 
@@ -99,6 +103,41 @@ $ ls ~/phone-termux                       # the mounted home
 $ systemctl status phone-termux-mount     # mount + forward/sshd state
 $ journalctl -u phone-termux-mount -e     # its log
 $ systemctl restart phone-termux-mount    # re-run forward + sshd + mount
+```
+
+## Cable-free mode
+
+```nix
+services.phoneTermuxMount = {
+  enable = true;
+  user = "michi";
+  remoteUser = "u0_a514";
+  wifi = {
+    enable = true;
+    host = "192.168.77.232";   # the phone's wlan0 address
+  };
+};
+```
+
+Before mounting, the unit runs `phone-connect`, which makes sure an adb transport
+exists over the network, then uses `host:5555` in preference to USB:
+
+1. already connected over TCP → nothing to do
+2. `adb connect host:5555`
+3. otherwise try the Wi-Fi neighbours from the ARP table (handy when the phone's
+   address is DHCP and you do not want to pin it)
+4. if nothing listens but the phone is on USB, `adb tcpip 5555` once, then retry
+
+The catch: classic TCP mode does **not** survive a reboot, because adbd comes back
+USB-only. After a power cycle you need one USB connection (or Android's Wireless
+debugging toggle, whose port is random and handled by mDNS instead) before the
+module can go cable-free again.
+
+Run the helper on its own with:
+
+```console
+$ nix run github:MBanucu/phone-termux-mount#phone-connect
+$ PHONE_HOST=192.168.77.232 nix run .#phone-connect
 ```
 
 ## Troubleshooting
@@ -115,6 +154,10 @@ $ sudo systemctl restart phone-termux-mount
 **Worked, then hung after replugging the phone.** The unit notices the sshfs process
 dying when the forward goes away and restarts, re-creating the forward first. If it does
 not recover, `sudo systemctl restart phone-termux-mount`.
+
+**Both USB and Wi-Fi are attached.** Every unit and script resolves one transport
+explicitly (`PHONE_SERIAL`, else the configured Wi-Fi serial, else the only device,
+else USB), because bare `adb` refuses to choose: `adb: more than one device/emulator`.
 
 **Slow directory listing.** Termux' home often holds huge trees (an Android SDK, for
 example). Browse targeted paths; do not `du -sh` the mount.
@@ -143,4 +186,6 @@ The pre-mount script is exposed as a package for debugging:
 ```console
 $ nix run github:MBanucu/phone-termux-mount#phone-termux-link
 $ PHONE_PORT=8022 PHONE_USER=u0_a514 nix run .#phone-termux-link
+
+$ nix run github:MBanucu/phone-termux-mount#phone-connect
 ```
