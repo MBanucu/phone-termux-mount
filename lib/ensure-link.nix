@@ -65,7 +65,7 @@ pkgs.writeShellScript "phone-termux-link" ''
 
   # No cable: bring up the Wi-Fi transport before giving up on a device.
   if ! pick_device >/dev/null; then
-    ${lib.optionalString (connectScript != null) ''
+    ${pkgs.lib.optionalString (connectScript != null) ''
       echo "no adb device yet; trying Wi-Fi"
       ${connectScript} || true
     ''}
