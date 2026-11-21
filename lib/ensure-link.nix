@@ -20,6 +20,40 @@ pkgs.writeShellScript "phone-termux-link" ''
   adb=${pkgs.android-tools}/bin/adb
   ssh=${pkgs.openssh}/bin/ssh
 
+  # A phone can be reachable over USB and Wi-Fi at the same time, and then plain
+  # `adb` fails with "more than one device". Pick one transport explicitly:
+  # PHONE_SERIAL if set, else the only device, else prefer USB (faster, and its
+  # forward is not affected by Wi-Fi drops).
+  pick_device() {
+    if [ -n "''${PHONE_SERIAL:-}" ]; then
+      echo "$PHONE_SERIAL"
+      return 0
+    fi
+    devices=$($adb devices | awk 'NR>1 && $2 == "device" { print $1 }')
+    count=$(printf '%s\n' "$devices" | grep -c . || true)
+    case "$count" in
+      0) return 1 ;;
+      1) printf '%s\n' "$devices"; return 0 ;;
+    esac
+    usb=$(printf '%s\n' "$devices" | grep -v ':' | head -n 1 || true)
+    if [ -n "$usb" ]; then
+      echo "$usb"
+    else
+      printf '%s\n' "$devices" | head -n 1
+    fi
+  }
+
+  if ! serial=$(pick_device); then
+    echo "waiting for an adb device…"
+    if ! timeout 30 "$adb" wait-for-device; then
+      echo "error: no adb device. Plug the phone in, or connect over Wi-Fi:" >&2
+      echo "  adb connect <phone-ip>:5555" >&2
+      exit 1
+    fi
+    serial=$(pick_device) || { echo "error: no usable adb device" >&2; exit 1; }
+  fi
+  echo "using adb device $serial"
+
   check() {
     $ssh -p "$port" \
       -o BatchMode=yes -o ConnectTimeout=4 \
@@ -28,14 +62,7 @@ pkgs.writeShellScript "phone-termux-link" ''
       "$remote_user@$host" true 2>/dev/null
   }
 
-  echo "waiting for an adb device…"
-  if ! timeout 30 "$adb" wait-for-device; then
-    echo "error: no adb device. Plug the phone in and authorize this computer:" >&2
-    echo "  adb devices" >&2
-    exit 1
-  fi
-
-  "$adb" forward "tcp:$port" "tcp:$port" >/dev/null
+  "$adb" -s "$serial" forward "tcp:$port" "tcp:$port" >/dev/null
   echo "adb forward tcp:$port -> tcp:$port established"
 
   if check; then
@@ -46,7 +73,7 @@ pkgs.writeShellScript "phone-termux-link" ''
     if startSshd then
       ''
         echo "sshd did not answer, asking Termux to start it (needs com.termux.adbbridge)"
-        "$adb" shell am start -n com.termux.adbbridge/.Bridge --es cmd 'sshd' >/dev/null 2>&1 || true
+        "$adb" -s "$serial" shell am start -n com.termux.adbbridge/.Bridge --es cmd 'sshd' >/dev/null 2>&1 || true
         for _ in $(seq 1 20); do
           sleep 1
           if check; then
