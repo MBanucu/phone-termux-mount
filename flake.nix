@@ -31,7 +31,8 @@
         default = self.apps.${pkgs.stdenv.hostPlatform.system}.phone-connect;
         phone-connect = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.phone-connect}/bin/phone-connect";
+          # writeShellScript makes the store path the executable itself.
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.phone-connect}";
         };
       });
 
