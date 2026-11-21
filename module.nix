@@ -4,20 +4,13 @@ let
   cfg = config.services.phoneTermuxMount;
 
   username = cfg.user;
-  user = config.users.users.${username};
 
-  # Primary group of the account, if NixOS knows about it.
-  knownGroup =
-    let
-      group = user.group or "";
-    in
-    group != "" && builtins.hasAttr group config.users.groups;
+  # The login name must live in the host spec; sshfs rejects `-o User=`.
+  what = "${cfg.remoteUser}@${cfg.sshHost}:${cfg.remotePath}";
 
-  groupName = if knownGroup then user.group else "-";
-
-  # Primary GID: the account's group if known, else the UID.
-  gid = if knownGroup then config.users.groups.${user.group}.gid else user.uid;
-
+  # No uid=/gid= here on purpose: NixOS assigns normal-user ids at activation,
+  # so config.users.users.<name>.uid may be null at eval time. Running sshfs as
+  # the user gets correct ownership from idmap=user without needing the number.
   mountOptions = lib.concatStringsSep "," (
     [
       "reconnect"
@@ -25,14 +18,12 @@ let
       "ServerAliveCountMax=3"
       "follow_symlinks"
       "idmap=user"
-      "uid=${toString user.uid}"
-      "gid=${toString gid}"
       "Port=${toString cfg.port}"
       "IdentityFile=${cfg.identityFile}"
       "IdentitiesOnly=yes"
       "Compression=no"
-      # Termux sshd is reachable only through the loopback adb forward, so host
-      # key verification would just be checking that 127.0.0.1 is 127.0.0.1.
+      # The only route is the loopback adb forward, so host key verification
+      # would check nothing but that 127.0.0.1 is 127.0.0.1.
       "StrictHostKeyChecking=no"
       "UserKnownHostsFile=/dev/null"
     ]
@@ -49,11 +40,11 @@ in
   options.services.phoneTermuxMount = {
     enable = lib.mkEnableOption ''
       mounting a Termux home directory from an adb-connected Android phone over sshfs,
-      with on-demand automount and an adb forward maintained by systemd'';
+      with the adb forward and sshd kept alive by systemd'';
 
     user = lib.mkOption {
       type = lib.types.str;
-      description = "Local account that owns the mountpoint and runs the adb forward.";
+      description = "Local account that owns the mount and runs both sshfs and the adb forward.";
       example = "michi";
     };
 
@@ -61,7 +52,7 @@ in
       type = lib.types.str;
       description = ''
         Termux's Linux user name on the phone. Find it by opening Termux and
-        running `whoami`, or `stat -c %U ~`.
+        running `whoami`.
       '';
       example = "u0_a514";
     };
@@ -94,8 +85,8 @@ in
       type = lib.types.path;
       default = "/home/${cfg.user}/.ssh/id_ed25519_phone";
       description = ''
-        Private key authorized in Termux's ~/.ssh/authorized_keys. Read by root at
-        mount time, so it must be readable by root (normal for a 0600 key in a home dir).
+        Private key authorized in Termux's ~/.ssh/authorized_keys. Read by the
+        mounting user, so a passphrase-free key is required for unattended mounts.
       '';
     };
 
@@ -114,12 +105,6 @@ in
       description = "Extra comma-separated options passed to sshfs.";
       example = [ "cache=yes" ];
     };
-
-    idleTimeout = lib.mkOption {
-      type = lib.types.str;
-      default = "60s";
-      description = "Unmount after this long with no access (systemd automount TimeoutIdleSec).";
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -131,51 +116,34 @@ in
       pkgs.sshfs
     ];
 
-    # The mountpoint must exist and belong to the user before automount can fire.
     systemd.tmpfiles.rules = [
-      "d ${cfg.mountpoint} 0755 ${username} ${groupName} -"
+      "d ${cfg.mountpoint} 0755 ${username} - -"
     ];
 
-    systemd.services.phone-termux-link = {
-      description = "Ensure adb forward and SSH access to Termux on the phone";
-      # Runs as the user so it reuses the user's adb server (a root adb server
-      # would fight it for the USB device); the forward it creates is on the
-      # loopback, so the root-owned sshfs mount can still connect to it.
+    # One unit, run as the user: the pre-start step establishes the adb forward
+    # (using the user's adb server, so no root adb race for the USB device), then
+    # sshfs mounts. Because the pre-start runs on every restart, a replugged or
+    # rebooted phone heals without manual action.
+    systemd.services.phone-termux-mount = {
+      description = "Termux home from the phone (sshfs over adb)";
+      wantedBy = [ "multi-user.target" ];
+      unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
-        Type = "oneshot";
+        Type = "simple";
         User = username;
-        ExecStart = linkScript;
-        # Bind to the phone link, not the network stack.
-        TimeoutStartSec = "90s";
+        ExecStartPre = linkScript;
+        ExecStart = lib.escapeShellArgs [
+          "${pkgs.sshfs}/bin/sshfs"
+          what
+          cfg.mountpoint
+          "-o"
+          mountOptions
+          "-f"
+        ];
+        ExecStop = "${config.security.wrapperDir}/fusermount3 -u ${cfg.mountpoint}";
+        Restart = "always";
+        RestartSec = "30s";
       };
     };
-
-    systemd.mounts = [
-      {
-        description = "Termux home on the phone (sshfs)";
-        # sshfs rejects `-o User=`; the login name must live in the host spec.
-        what = "${cfg.remoteUser}@${cfg.sshHost}:${cfg.remotePath}";
-        where = cfg.mountpoint;
-        type = "fuse.sshfs";
-        options = mountOptions;
-        requires = [ "phone-termux-link.service" ];
-        after = [ "phone-termux-link.service" ];
-      }
-    ];
-
-    systemd.automounts = [
-      {
-        where = cfg.mountpoint;
-        wantedBy = [ "multi-user.target" ];
-        automountConfig.TimeoutIdleSec = cfg.idleTimeout;
-      }
-    ];
-
-    assertions = [
-      {
-        assertion = config.users.users ? ${username};
-        message = "services.phoneTermuxMount.user = \"${username}\" is not a local user.";
-      }
-    ];
   };
 }

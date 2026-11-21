@@ -1,11 +1,11 @@
 # phone-termux-mount
 
 NixOS module that mounts a Termux home directory from an adb-connected Android phone
-over sshfs — with on-demand automount and a systemd unit that keeps the `adb forward`
-(and Termux's `sshd`) alive.
+over sshfs, with one systemd unit that keeps the `adb forward` and Termux's `sshd`
+alive alongside the mount.
 
 ```console
-$ ls ~/phone-termux            # triggers the automount
+$ ls ~/phone-termux
 android-sdk  go  projects      # Termux' own home, as a normal directory
 ```
 
@@ -16,12 +16,13 @@ forward you would otherwise set up by hand.
 
 | Piece | Purpose |
 |---|---|
-| `phone-termux-link.service` | runs as your user: waits for the phone, creates `adb forward tcp:8022 tcp:8022`, checks that sshd answers, and optionally asks the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app to start it |
-| `<mountpoint>.mount` | root-owned `fuse.sshfs` mount of `/data/data/com.termux/files/home`, `Requires=` the link unit |
-| `<mountpoint>.automount` | mounts on first access, unmounts again after `idleTimeout` |
+| `phone-termux-mount.service` | runs as **your user**: `ExecStartPre` waits for the phone, creates `adb forward tcp:8022 tcp:8022`, checks that sshd answers (and asks the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app to start it if not), then sshfs mounts `/data/data/com.termux/files/home` in the foreground |
 
-The mount itself runs as root (that is the normal systemd mount model), so it does not
-depend on a login session; files are presented as your user via `uid=`/`gid=`.
+The mount is started at boot and restarted every 30 s while the phone is unreachable, so
+replugging or rebooting the phone heals on its own. Because sshfs runs as your user,
+files come back owned by you (`idmap=user`) with no `uid=`/`gid=` guesswork — which
+matters, since NixOS assigns normal-user ids at activation and they are `null` while the
+configuration is evaluated.
 
 ## Requirements
 
@@ -90,40 +91,30 @@ imports = [ "${builtins.fetchTarball "https://github.com/MBanucu/phone-termux-mo
 | `identityFile` | `/home/<user>/.ssh/id_ed25519_phone` | key authorized in Termux |
 | `startSshd` | `true` | ask the bridge app to start sshd when it does not answer |
 | `extraOptions` | `[]` | extra sshfs options, e.g. `[ "cache=yes" ]` |
-| `idleTimeout` | `"60s"` | automount idle timeout |
 
 ## Using it
 
 ```console
-$ ls ~/phone-termux                    # mount on demand
-$ systemctl status phone-termux-link   # did the forward/sshd step work?
-$ journalctl -u phone-termux-link -e   # its log
-```
-
-Unit names contain the escaped path, so target them by pattern:
-
-```console
-$ systemctl list-units 'home-*phone*'
-$ sudo systemctl restart "$(systemd-escape -p --suffix=mount ~/phone-termux)"
+$ ls ~/phone-termux                       # the mounted home
+$ systemctl status phone-termux-mount     # mount + forward/sshd state
+$ journalctl -u phone-termux-mount -e     # its log
+$ systemctl restart phone-termux-mount    # re-run forward + sshd + mount
 ```
 
 ## Troubleshooting
 
-**`ls` hangs, then fails.** The link unit could not reach sshd. Check
-`journalctl -u phone-termux-link -e`; typical causes are Termux force-stopped by the
-battery optimizer, or `sshd` never started. Reset and retry:
+**`~/phone-termux` is empty or `ls` hangs.** The unit could not reach sshd. Check
+`journalctl -u phone-termux-mount -e`; typical causes are Termux force-stopped by the
+battery optimizer, or `sshd` never started. The unit retries every 30 s, so fixing the
+phone is often enough; otherwise:
 
 ```console
-$ sudo systemctl reset-failed phone-termux-link.service
-$ sudo systemctl restart phone-termux-link.service
+$ sudo systemctl restart phone-termux-mount
 ```
 
-**Worked, then hung after replugging the phone.** The forward died with the adb
-server. The mount has `reconnect`, so it recovers once the forward is back:
-
-```console
-$ sudo systemctl restart phone-termux-link.service
-```
+**Worked, then hung after replugging the phone.** The unit notices the sshfs process
+dying when the forward goes away and restarts, re-creating the forward first. If it does
+not recover, `sudo systemctl restart phone-termux-mount`.
 
 **Slow directory listing.** Termux' home often holds huge trees (an Android SDK, for
 example). Browse targeted paths; do not `du -sh` the mount.
@@ -143,7 +134,7 @@ $ /run/wrappers/bin/fusermount3 -u ~/phone-termux
   instead, set `extraOptions = [ "StrictHostKeyChecking=yes" ]` and give root a known_hosts.
 - Everything with access to the local adb server can do the same thing by hand. This
   module automates it, it does not widen access.
-- `identityFile` is read by root at mount time. Use a key dedicated to this mount.
+- `identityFile` must be readable by the mounting user and have no passphrase, since the mount happens unattended. Use a key dedicated to this mount.
 
 ## Standalone helper
 
