@@ -36,6 +36,12 @@
         };
       });
 
+      # The self-heal logic, exercised with stubbed commands so it needs no
+      # phone, FUSE mount, systemd or root: nix flake check
+      checks = forAllSystems (pkgs: {
+        self-heal = import ./checks.nix { inherit pkgs; };
+      });
+
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
 }

@@ -24,6 +24,10 @@
   port ? 8022,
   remoteUser,
   identityFile,
+  # Only replaced to exercise this without systemd or a phone; see checks.nix.
+  systemctl ? "${systemdPackage}/bin/systemctl",
+  ssh ? "${pkgs.openssh}/bin/ssh",
+  runuser ? "${pkgs.util-linux}/bin/runuser",
 }:
 pkgs.writeShellScript "phone-termux-watchdog" ''
   set -eu
@@ -42,10 +46,10 @@ pkgs.writeShellScript "phone-termux-watchdog" ''
 
   restart() {
     echo "$1; restarting ${unit}"
-    ${systemdPackage}/bin/systemctl restart ${unit}
+    ${systemctl} restart ${unit}
   }
 
-  state=$(${systemdPackage}/bin/systemctl is-active ${unit} || true)
+  state=$(${systemctl} is-active ${unit} || true)
   if [ "$state" != "active" ]; then
     echo "${unit} is '$state' — leaving it to its own retries"
     exit 0
@@ -53,7 +57,7 @@ pkgs.writeShellScript "phone-termux-watchdog" ''
 
   # The tunnel first: if sshd is gone the mount check below would only hang
   # until its timeout and report the same thing.
-  if ! ssh -p ${toString port} \
+  if ! ${ssh} -p ${toString port} \
       -o BatchMode=yes -o ConnectTimeout=5 \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -i ${pkgs.lib.escapeShellArg (toString identityFile)} \
@@ -67,7 +71,7 @@ pkgs.writeShellScript "phone-termux-watchdog" ''
   # fails at once when it is a stale endpoint; either way it is not a mount we
   # can use. This runs as the mounting user: the mount is not allow_other, so
   # root gets EACCES on a perfectly healthy mount.
-  if ! runuser -u ${pkgs.lib.escapeShellArg user} -- \
+  if ! ${runuser} -u ${pkgs.lib.escapeShellArg user} -- \
       timeout 10 stat -c %d "$mp" >/dev/null 2>&1; then
     restart "sshfs on $mp is not answering (dead or stale mount)"
   fi

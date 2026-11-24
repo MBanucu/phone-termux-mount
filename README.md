@@ -300,6 +300,19 @@ $ journalctl -u phone-termux-mount-watchdog -n 20
   module automates it, it does not widen access.
 - `identityFile` must be readable by the mounting user and have no passphrase, since the mount happens unattended. Use a key dedicated to this mount.
 
+## Checks
+
+`nix flake check` exercises the two self-heal scripts — the pre-mount clear and the
+watchdog's decision — with stubbed `findmnt`, `fusermount3`, `ssh`, `runuser` and
+`systemctl`. No phone, FUSE mount, systemd or root is involved; the stubs record what was
+called and are told whether to fail, so the check covers which condition triggers a
+restart and that a mount left behind is cleared before sshfs sees it. It fails if the
+watchdog stops probing the mount, which is the regression it exists for:
+
+```console
+$ nix build -L .#checks.x86_64-linux.self-heal
+```
+
 ## Standalone helper
 
 The pre-mount script is exposed as a package for debugging:
