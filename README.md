@@ -16,8 +16,8 @@ forward you would otherwise set up by hand.
 
 | Piece | Purpose |
 |---|---|
-| `phone-termux-mount.service` | runs as **your user**, sshfs mounting `/data/data/com.termux/files/home` in the foreground. Its `ExecStartPre` differs by transport: `adb` waits for the phone, creates `adb forward tcp:8022 tcp:8022`, then checks sshd; `direct` only checks sshd. In both cases the phone is asked to start sshd through the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app when it does not answer |
-| `phone-termux-mount-watchdog.timer` | every 2 min, probes sshd; when a mount that claims to be `active` no longer answers, restarts the mount unit so it resyncs instead of sitting there dead |
+| `phone-termux-mount.service` | runs as **your user**, sshfs mounting `/data/data/com.termux/files/home` in the foreground. Its `ExecStartPre` first clears a stale mountpoint (see [Troubleshooting](#troubleshooting)), then differs by transport: `adb` waits for the phone, creates `adb forward tcp:8022 tcp:8022`, then checks sshd; `direct` only checks sshd. In both cases the phone is asked to start sshd through the [`termux-adb-bridge`](https://github.com/MBanucu/termux-adb-bridge) app when it does not answer |
+| `phone-termux-mount-watchdog.timer` | every 2 min, probes sshd **and** the mountpoint itself; when a mount that claims to be `active` no longer answers, restarts the mount unit so it resyncs instead of sitting there dead |
 
 The mount is started at boot and restarted every 30 s while the phone is unreachable, so
 replugging or rebooting the phone heals on its own. Because sshfs runs as your user,
@@ -95,7 +95,7 @@ imports = [ "${builtins.fetchTarball "https://github.com/MBanucu/phone-termux-mo
 | `identityFile` | `/home/<user>/.ssh/id_ed25519_phone` | key authorized in Termux |
 | `startSshd` | `true` | ask the bridge app to start sshd when it does not answer |
 | `extraOptions` | `[]` | extra sshfs options, e.g. `[ "cache=yes" ]` |
-| `watchdog.enable` | `true` | restart the mount when sshd stops answering |
+| `watchdog.enable` | `true` | restart the mount when sshd or the mountpoint stops answering |
 | `watchdog.interval` | `"2min"` | how often the watchdog probes sshd |
 | `wifi.enable` | `false` | use adb over Wi-Fi instead of the cable, and prefer it when available |
 | `wifi.host` | — | the phone's address on the network (required when `wifi.enable`) |
@@ -226,6 +226,22 @@ not recover, `sudo systemctl restart phone-termux-mount`.
 explicitly (`PHONE_SERIAL`, else the configured Wi-Fi serial, else the only device,
 else USB), because bare `adb` refuses to choose: `adb: more than one device/emulator`.
 
+**A sshfs died and left the mountpoint dead.** `~/phone-termux` says `Transport endpoint
+is not connected` and every mount attempt fails with `fuse: failed to access mountpoint`.
+A sshfs that was killed (SIGKILL, OOM, the machine suspending) leaves a dead FUSE endpoint
+behind, and because the failing command is `ExecStart`, systemd never runs `ExecStop` — the
+only step that would unmount — so the unit used to retry forever.
+
+`ExecStartPre` now clears it on every attempt, which is also what makes the watchdog's
+restart work. It checks the mount table with `findmnt` rather than `mountpoint`, because
+`mountpoint` stats the path and reports a dead endpoint as *not* a mountpoint. To do it by
+hand:
+
+```console
+$ /run/wrappers/bin/fusermount3 -u ~/phone-termux     # or -uz if that refuses
+$ sudo systemctl restart phone-termux-mount
+```
+
 **Slow directory listing.** Termux' home often holds huge trees (an Android SDK, for
 example). Browse targeted paths; do not `du -sh` the mount.
 
@@ -242,17 +258,29 @@ sshfs is started with `reconnect`, which is what makes a short network hiccup
 survivable — but it also means sshfs does **not** exit when sshd dies or the phone drops
 off the network. The unit keeps saying `active` while the mount answers nothing.
 
-The watchdog closes that gap. Every `watchdog.interval` it runs
+The watchdog closes that gap. Every `watchdog.interval` it does two probes. First the
+tunnel, as root with the mount's key:
 
 ```console
 ssh -p 8022 … u0_a514@192.168.77.232 true
 ```
 
-as root with the mount's key. If that fails **and** the unit is `active`, it restarts
-`phone-termux-mount.service`; the restart re-runs `ExecStartPre`, which starts sshd over
-the bridge if adb can reach the phone, then sshfs mounts again. A unit that is already
-failing and retrying (`activating`) is left alone, so a phone that stays off does not
-cause a restart every two minutes.
+If that fails, the mount cannot be read either, so it restarts the unit straight away.
+Otherwise it probes the mount itself — one `stat` of the mountpoint, run as the mounting
+user because the mount is not `allow_other` and even root gets `EACCES` on a healthy one:
+
+```console
+runuser -u michi -- timeout 10 stat -c %d /home/michi/phone-termux
+```
+
+A getattr on a dead endpoint hangs until the timeout, and on a stale one fails at once;
+either way it restarts `phone-termux-mount.service`. That matters because sshd can answer
+perfectly while the mountpoint is dead, which is exactly what a leftover sshfs looks like.
+
+A restart re-runs `ExecStartPre`, which clears a stale mountpoint, starts sshd over the
+bridge if adb can reach the phone, then mounts again. A unit that is already failing and
+retrying (`activating`) is left alone, so a phone that stays off does not cause a restart
+every two minutes.
 
 The consequence: a dead mount heals within one interval instead of waiting for some
 unrelated access to trip over it. Check it with:

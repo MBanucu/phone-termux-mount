@@ -68,9 +68,18 @@ let
     host = probeHost;
   };
 
+  # A sshfs that died without unmounting leaves a dead FUSE endpoint, and sshfs
+  # then refuses to mount over it. Since the failing command is ExecStart,
+  # ExecStop never runs and the unit would retry forever without this.
+  prepareMountpoint = import ./lib/prepare-mountpoint.nix {
+    inherit pkgs;
+    inherit (cfg) mountpoint;
+    fusermount = "${config.security.wrapperDir}/fusermount3";
+  };
+
   watchdog = import ./lib/watchdog.nix {
     inherit pkgs;
-    inherit (cfg) port remoteUser identityFile;
+    inherit (cfg) port remoteUser identityFile mountpoint user;
     host = probeHost;
     unit = "phone-termux-mount.service";
     systemdPackage = config.systemd.package;
@@ -151,8 +160,9 @@ in
         type = lib.types.bool;
         default = true;
         description = ''
-          Periodically check that the phone's sshd answers, and restart the mount
-          when it does not, instead of leaving a dead sshfs mount behind.
+          Periodically check that the phone's sshd answers and that the mountpoint
+          itself is readable, and restart the mount when either fails, instead of
+          leaving a dead sshfs mount behind.
         '';
       };
 
@@ -257,10 +267,13 @@ in
       serviceConfig = {
         Type = "simple";
         User = username;
-        # adb mode has a forward to create; direct mode only needs sshd to be up,
-        # and it gets started through the bridge when it is not.
-        ExecStartPre =
-          if cfg.transport == "direct" then ensureSshd else linkScript;
+        # Always clear a stale mountpoint first, then establish the transport:
+        # adb mode has a forward to create, direct mode only needs sshd to be
+        # up, and it gets started through the bridge when it is not.
+        ExecStartPre = [
+          prepareMountpoint
+          (if cfg.transport == "direct" then ensureSshd else linkScript)
+        ];
         ExecStart = lib.escapeShellArgs [
           "${pkgs.sshfs}/bin/sshfs"
           what
